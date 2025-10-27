@@ -1,0 +1,26 @@
+services:
+  app:
+    build: .
+    container_name: python_app
+    depends_on:
+      - mongo
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GITHUB_PAT=${GITHUB_PAT}
+      - MONGO_HOST=mongodb
+      - MONGO_PORT=27017
+      - UPDATE_PERIOD=${UPDATE_PERIOD:-10}
+    volumes:
+      - ./app:/app
+    command: python main.py --period ${UPDATE_PERIOD:-10}
+
+  mongo:
+    image: mongo:noble
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  mongo_data:
