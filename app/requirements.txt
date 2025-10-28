@@ -1,3 +1,6 @@
 pymongo
 python-dotenv
 requests
+selenium
+beautifulsoup4
+pillow
