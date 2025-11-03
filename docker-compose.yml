@@ -14,13 +14,13 @@ services:
     volumes:
       - ./app:/app
       - ./data:/app/data
-    command: python startup.py --main-period ${MAIN_PERIOD:-10} --fetch-period ${FETCH_PERIOD:-10}
+    command: python startup.py
 
   mongo:
     image: mongo:noble
     container_name: mongodb
     ports:
-      - "27017:27017"
+      - "127.0.0.1:27017:27017"
     volumes:
       - mongo_data:/data/db
 
