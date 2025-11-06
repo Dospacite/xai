@@ -1,134 +1,123 @@
 #!/usr/bin/env python3
 """
-Startup script to run both main.py and fetch_website_content.py concurrently in Docker.
+Simplified startup script to run main.py and fetch_website_content.py concurrently.
 """
 
-import os
-import sys
-import subprocess
-import signal
-import time
-from multiprocessing import Process
 import argparse
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from typing import List
 
-# Global flag for graceful shutdown
-running = True
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-
-def signal_handler(sig, frame):
-    """Handle shutdown signals gracefully."""
-    global running
-    print("\nShutting down gracefully...")
-    running = False
-    sys.exit(0)
-
-
-def run_main_script(period_minutes):
-    """Run the main.py script (phishing feed fetcher)."""
-    try:
-        print("Starting phishing feed fetcher (main.py)...")
-        subprocess.run([
-            sys.executable, "main.py", 
-            "--period", str(period_minutes)
-        ], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Error running main.py: {e}")
-    except KeyboardInterrupt:
-        print("main.py interrupted")
+CHILD_PROCS: List[subprocess.Popen] = []
 
 
-def run_fetch_script(period_minutes):
-    """Run the fetch_website_content.py script."""
-    try:
-        print("Starting website content fetcher (fetch_website_content.py)...")
-        subprocess.run([
-            sys.executable, "fetch_website_content.py",
-            "--period", str(period_minutes)
-        ], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Error running fetch_website_content.py: {e}")
-    except KeyboardInterrupt:
-        print("fetch_website_content.py interrupted")
+def start_child(script: str, period: int) -> subprocess.Popen:
+    """Start a child Python script with the given period and return the Popen object."""
+    cmd = [sys.executable, script, "--period", str(period)]
+    logging.info("Starting %s (period=%s)", script, period)
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def terminate_children(timeout: float = 5.0):
+    """Attempt graceful shutdown, then force kill if needed."""
+    if not CHILD_PROCS:
+        return
+
+    logging.info("Terminating child processes...")
+    for p in CHILD_PROCS:
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if all((p.poll() is not None) for p in CHILD_PROCS):
+            break
+        time.sleep(0.1)
+
+    # Force kill any remaining
+    for p in CHILD_PROCS:
+        if p.poll() is None:
+            logging.warning("Killing unresponsive child pid=%s", p.pid)
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
+def forward_output(proc: subprocess.Popen, name: str):
+    """Non-blocking-ish drain of stdout (called infrequently in the monitor loop)."""
+    if proc.stdout:
+        # read available lines without blocking - .readline() will block if nothing
+        # so use .read() limited to avoid blocking too long; here small chunk
+        try:
+            out = proc.stdout.read()
+            if out:
+                for line in out.splitlines():
+                    logging.info("[%s] %s", name, line)
+        except Exception:
+            # If the OS buffer doesn't support non-blocking read, ignore
+            pass
 
 
 def main():
-    """Main function to start both scripts."""
-    global running
-    
-    # Set up signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(
-        description="Startup script for phishing feed and website content fetchers"
-    )
-    parser.add_argument(
-        "--main-period",
-        type=int,
-        default=10,
-        help="Update period for main.py in minutes (default: 10)"
-    )
-    parser.add_argument(
-        "--fetch-period",
-        type=int,
-        default=30,
-        help="Update period for fetch_website_content.py in minutes (default: 30)"
-    )
-    
+    parser = argparse.ArgumentParser(description="Startup both fetchers concurrently")
+    parser.add_argument("--main-period", type=int, default=10, help="main.py period in minutes")
+    parser.add_argument("--fetch-period", type=int, default=30, help="fetch_website_content.py period in minutes")
     args = parser.parse_args()
-    
-    print("Starting both phishing feed fetcher and website content fetcher...")
-    print(f"Main script period: {args.main_period} minutes")
-    print(f"Fetch script period: {args.fetch_period} minutes")
-    print("Press Ctrl+C to stop both scripts")
-    
-    # Start both scripts as separate processes
-    main_process = Process(
-        target=run_main_script,
-        args=(args.main_period,)
-    )
-    
-    fetch_process = Process(
-        target=run_fetch_script,
-        args=(args.fetch_period,)
-    )
-    
+
+    # Validate scripts exist (optional but helpful)
+    scripts = [("main.py", args.main_period), ("fetch_website_content.py", args.fetch_period)]
+    for name, _ in scripts:
+        if not os.path.exists(name):
+            logging.warning("Script %s not found in working directory", name)
+
+    # Start children
     try:
-        # Start both processes
-        main_process.start()
-        fetch_process.start()
-        
-        print("Both scripts started successfully")
-        
-        # Wait for both processes to complete
-        main_process.join()
-        fetch_process.join()
-        
-    except KeyboardInterrupt:
-        print("\nReceived interrupt signal, stopping both scripts...")
-        
-        # Terminate both processes
-        if main_process.is_alive():
-            main_process.terminate()
-        if fetch_process.is_alive():
-            fetch_process.terminate()
-        
-        # Wait for processes to terminate
-        main_process.join(timeout=5)
-        fetch_process.join(timeout=5)
-        
-        # Force kill if still alive
-        if main_process.is_alive():
-            main_process.kill()
-        if fetch_process.is_alive():
-            fetch_process.kill()
-        
-        print("Both scripts stopped")
-    
+        CHILD_PROCS.extend([
+            start_child("main.py", args.main_period),
+            start_child("fetch_website_content.py", args.fetch_period),
+        ])
+
+        # Setup signal handlers to do graceful shutdown
+        def _signal_handler(signum, frame):
+            logging.info("Received signal %s, shutting down...", signum)
+            terminate_children()
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
+
+        # Monitor loop: poll children, forward a bit of output, exit if both exit
+        while True:
+            alive = [p for p in CHILD_PROCS if p.poll() is None]
+            for p, name in zip(CHILD_PROCS, ("main", "fetch")):
+                if p.poll() is None:
+                    forward_output(p, name)
+                else:
+                    # drain remaining output once after exit
+                    forward_output(p, name)
+
+            if not alive:
+                logging.info("All child processes exited.")
+                break
+
+            time.sleep(0.5)
+
+    except SystemExit:
+        raise
     except Exception as e:
-        print(f"Error running scripts: {e}")
-        sys.exit(1)
+        logging.exception("Unexpected error in startup script: %s", e)
+    finally:
+        terminate_children()
 
 
 if __name__ == "__main__":
