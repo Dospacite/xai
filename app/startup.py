@@ -21,7 +21,7 @@ def start_child(script: str, period: int) -> subprocess.Popen:
     """Start a child Python script with the given period and return the Popen object."""
     cmd = [sys.executable, script, "--period", str(period)]
     logging.info("Starting %s (period=%s)", script, period)
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return subprocess.Popen(cmd)
 
 
 def terminate_children(timeout: float = 5.0):
@@ -71,14 +71,8 @@ def forward_output(proc: subprocess.Popen, name: str):
 def main():
     parser = argparse.ArgumentParser(description="Startup both fetchers concurrently")
     parser.add_argument("--main-period", type=int, default=10, help="main.py period in minutes")
-    parser.add_argument("--fetch-period", type=int, default=30, help="fetch_website_content.py period in minutes")
+    parser.add_argument("--fetch-period", type=int, default=10, help="fetch_website_content.py period in minutes")
     args = parser.parse_args()
-
-    # Validate scripts exist (optional but helpful)
-    scripts = [("main.py", args.main_period), ("fetch_website_content.py", args.fetch_period)]
-    for name, _ in scripts:
-        if not os.path.exists(name):
-            logging.warning("Script %s not found in working directory", name)
 
     # Start children
     try:

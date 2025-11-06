@@ -58,34 +58,30 @@ class MongoManager:
         port = int(os.getenv("MONGO_PORT", "27017"))
         self.client = MongoClient(f"mongodb://{host}:{port}/")
         self.db = self.client.phishing_db
-        self.feed = self.db.phishing_feed
+        self.urls = self.db.phishing_urls
         self.content = self.db.website_content
 
     def ensure_visited_field(self):
-        self.feed.update_many({"visited": {"$exists": False}}, {"$set": {"visited": False}})
+        self.urls.update_many({"visited": {"$exists": False}}, {"$set": {"visited": False}})
 
     def get_unvisited(self) -> List[str]:
-        urls = self.feed.find(
+        urls = self.urls.find(
             {"$or": [{"visited": False}, {"visited": {"$exists": False}}]}, {"url": 1, "_id": 0}
         )
         return [u["url"] for u in urls]
 
     def mark_visited(self, url: str):
-        self.feed.update_one(
+        self.urls.update_one(
             {"url": url}, {"$set": {"visited": True, "visited_at": datetime.utcnow()}}
         )
 
+    def mark_error(self, url: str, error: str):
+        self.urls.update_one(
+            {"url": url}, {"$set": {"visited": True, "visited_at": datetime.utcnow(), "error": error}}
+        )
+
     def save_content(self, data: Dict):
-        simplified = {
-            "url": data.get("url"),
-            "title": data.get("title"),
-            "screenshot_path": data.get("screenshot_path"),
-            "status": data.get("status"),
-            "fetched_at": data.get("fetched_at"),
-            "error": data.get("error"),
-            "rdap": data.get("rdap", {}),
-        }
-        self.content.insert_one(simplified)
+        self.content.insert_one(data)
 
     def close(self):
         self.client.close()
@@ -131,7 +127,7 @@ class Browser:
         except (TimeoutException, WebDriverException) as e:
             return {"url": url, "status": "error", "error": str(e)}
 
-        time.sleep(3)
+        time.sleep(10)
         soup = BeautifulSoup(self.driver.page_source, "html.parser")
         title = soup.title.string if soup.title else ""
 
@@ -144,9 +140,9 @@ class Browser:
         return {
             "url": url,
             "title": title,
+            "html": self.driver.page_source,
             "screenshot_path": path,
             "fetched_at": datetime.utcnow(),
-            "status": "success",
             "error": None
         }
 
@@ -168,6 +164,9 @@ def process_sites(mongo: MongoManager, browser: Browser):
 
         mongo.save_content(result)
         mongo.mark_visited(url)
+        if result.get("error"):
+            mongo.mark_error(url, result["error"])
+        
 
 def run(interval_min: int = 10):
     print(f"Starting periodic fetcher with undetected_chromedriver (every {interval_min} min).")
@@ -201,5 +200,5 @@ if __name__ == "__main__":
     if args.period <= 0:
         raise ValueError("Period must be positive")
 
-    time.sleep(5)
+    time.sleep(30)
     run(args.period)
