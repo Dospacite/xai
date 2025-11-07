@@ -16,6 +16,12 @@ services:
       - ./data:/app/data
     command: python startup.py
 
+    shm_size: 2g
+    mem_limit: 6g
+    cpus: 3
+
+    restart: unless-stopped
+
   mongo:
     image: mongo:noble
     container_name: mongodb
