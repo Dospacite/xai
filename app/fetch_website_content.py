@@ -5,7 +5,7 @@ import signal
 import hashlib
 import requests
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 from typing import Dict, List
 import threading
 import queue
@@ -20,11 +20,15 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 import urllib3
 
+from filelock import FileLock
+from pathlib import Path
+import tempfile
+
 
 load_dotenv()
 RUNNING = True
 
-browser_init_lock = threading.Lock()
+browser_init_lock = FileLock(Path(tempfile.gettempdir()) / "chromedriver_init.lock")
 
 def handle_signal(sig, frame):
     global RUNNING
@@ -83,7 +87,9 @@ class MongoManager:
     def __init__(self):
         host = os.getenv("MONGO_HOST", "mongodb")
         port = int(os.getenv("MONGO_PORT", "27017"))
-        self.client = MongoClient(f"mongodb://{host}:{port}/")
+        # url encode username and password
+        mongo_uri = f"mongodb://{quote_plus(os.getenv('MONGO_USER'))}:{quote_plus(os.getenv('MONGO_PASSWORD'))}@{host}:{port}/phishing_db?authSource=admin"
+        self.client = MongoClient(mongo_uri)
         self.db = self.client.phishing_db
         self.urls = self.db.phishing_urls
         self.content = self.db.website_content

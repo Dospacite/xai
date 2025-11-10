@@ -7,11 +7,15 @@ from datetime import datetime
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import argparse
+from urllib.parse import quote_plus
 
 
 load_dotenv()
 GITHUB_PAT = os.getenv("GITHUB_PAT")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://mongodb:27017/")
+MONGO_USER = os.getenv("MONGO_USER", "admin")
+MONGO_PASSWORD = os.getenv("MONGO_PASSWORD", "password")
+# url encode username and password
+MONGO_URI = os.getenv("MONGO_URI", f"mongodb://{quote_plus(os.getenv('MONGO_USER'))}:{quote_plus(os.getenv('MONGO_PASSWORD'))}@mongodb:27017/phishing_db?authSource=admin")
 UPDATE_PERIOD = int(os.getenv("UPDATE_PERIOD", "10"))  # minutes
 
 FEED_URL = "https://raw.githubusercontent.com/openphish/academic/main/feed.csv"
