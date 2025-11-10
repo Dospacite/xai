@@ -132,7 +132,12 @@ class Browser:
             options.add_argument("--disable-blink-features=AutomationControlled")
             
             with browser_init_lock:
-                self.driver = uc.Chrome(options=options, user_multi_procs=True)
+                self.driver = uc.Chrome(
+                    options=options,
+                    browser_executable_path="/usr/bin/chromium",
+                    driver_executable_path="/usr/bin/chromedriver",
+                    use_subprocess=True
+                )
                 self.driver.set_page_load_timeout(60)
                 self.driver.set_script_timeout(30)
         except Exception as e:
