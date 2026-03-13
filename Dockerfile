@@ -1,10 +1,9 @@
 # Use an official Python image
 FROM python:3.11-slim
 
-# Install system dependencies for Selenium + Chrome
+# Install minimal tools used during dependency setup.
 RUN apt-get update && apt-get install -y \
-    wget unzip curl gnupg2 \
-    chromium chromium-driver \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -14,13 +13,11 @@ WORKDIR /app
 COPY app/requirements.txt .
 
 # Install Python packages
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && scrapling install
 
 # Copy project files
 COPY app/ .
-
-# Create data directory for screenshots
-RUN mkdir -p /app/data/screenshots
 
 # Run the startup script
 CMD ["python", "startup.py"]

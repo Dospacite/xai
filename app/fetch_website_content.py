@@ -1,8 +1,7 @@
 import os
-import sys
 import time
 import signal
-import hashlib
+import ipaddress
 import requests
 from datetime import datetime
 from urllib.parse import urlparse, quote_plus
@@ -12,23 +11,13 @@ import queue
 
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from bs4 import BeautifulSoup
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
-import urllib3
-
-from filelock import FileLock
-from pathlib import Path
-import tempfile
+from scrapling.fetchers import StealthySession
+import tldextract
 
 
 load_dotenv()
 RUNNING = True
-
-browser_init_lock = FileLock(Path(tempfile.gettempdir()) / "chromedriver_init.lock")
+RDAP_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=None)
 
 def handle_signal(sig, frame):
     global RUNNING
@@ -40,55 +29,62 @@ signal.signal(signal.SIGTERM, handle_signal)
 
 
 def fetch_rdap_data(url: str) -> Dict:
-    domain = urlparse(url).netloc.lstrip("www.")
-    if not domain:
-        return {"rdap_status": "error", "error": "Invalid domain"}
+    parsed = urlparse(url if "://" in url else f"//{url}")
+    hostname = parsed.hostname
+    if not hostname:
+        return {"rdap_status": "error", "error": "Invalid URL hostname"}
 
     try:
-        response = requests.get(f"https://rdap.org/domain/{domain}", timeout=10)
+        normalized_host = hostname.encode("idna").decode("ascii").rstrip(".").lower()
+    except UnicodeError as e:
+        return {"rdap_status": "error", "error": f"Invalid IDN hostname: {e}"}
+
+    lookup_path = "domain"
+    lookup_value = normalized_host
+
+    try:
+        lookup_value = str(ipaddress.ip_address(normalized_host))
+        lookup_path = "ip"
+    except ValueError:
+        extracted = RDAP_EXTRACTOR(normalized_host)
+        if not extracted.suffix or not extracted.domain:
+            return {
+                "rdap_status": "error",
+                "error": f"Unable to determine registrable domain for host '{normalized_host}'",
+            }
+        lookup_value = (
+            getattr(extracted, "top_domain_under_public_suffix", None)
+            or extracted.registered_domain
+        )
+
+    try:
+        response = requests.get(
+            f"https://rdap.org/{lookup_path}/{lookup_value}",
+            timeout=10,
+            headers={"Accept": "application/rdap+json, application/json"},
+        )
         if response.status_code == 200:
             data = response.json()
+            data["_rdap_lookup"] = {
+                "input_url": url,
+                "hostname": normalized_host,
+                "lookup_path": lookup_path,
+                "lookup_value": lookup_value,
+            }
             return data
         return {"rdap_status": "error", "error": f"HTTP {response.status_code}"}
     except Exception as e:
         return {"rdap_status": "error", "error": str(e)}
 
 
-def extract_request_metadata(url: str) -> Dict:
-    try:
-        response = requests.get(url, timeout=10, allow_redirects=True)
-        redirect_history = []
-        for redirect in response.history:
-            redirect_history.append({
-                "status_code": redirect.status_code,
-                "url": redirect.url,
-                "headers": dict(redirect.headers),
-                "timestamp": datetime.utcnow()
-            })
-
-        metadata = {
-            "url": url,
-            "status_code": response.status_code,
-            "headers": dict(response.headers),
-            "encoding": response.encoding,
-            "elapsed_ms": response.elapsed.total_seconds() * 1000,
-            "final_url": response.url,
-            "redirect_count": len(response.history),
-            "redirect_history": redirect_history,
-            "content_length": len(response.content),
-            "timestamp": datetime.utcnow()
-        }
-        return metadata
-    except Exception as e:
-        return {"url": url, "error": str(e)}
-
-
 class MongoManager:
     def __init__(self):
         host = os.getenv("MONGO_HOST", "mongodb")
         port = int(os.getenv("MONGO_PORT", "27017"))
+        mongo_user = quote_plus(os.getenv("MONGO_USER", "admin"))
+        mongo_password = quote_plus(os.getenv("MONGO_PASSWORD", "password"))
         # url encode username and password
-        mongo_uri = f"mongodb://{quote_plus(os.getenv('MONGO_USER'))}:{quote_plus(os.getenv('MONGO_PASSWORD'))}@{host}:{port}/phishing_db?authSource=admin"
+        mongo_uri = f"mongodb://{mongo_user}:{mongo_password}@{host}:{port}/phishing_db?authSource=admin"
         self.client = MongoClient(mongo_uri)
         self.db = self.client.phishing_db
         self.urls = self.db.phishing_urls
@@ -123,74 +119,114 @@ class MongoManager:
 class Browser:
     def __init__(self):
         try:
-            options = uc.ChromeOptions()
-            options.headless = True
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1920,1080")
-            options.add_argument("--disable-blink-features=AutomationControlled")
-            
-            with browser_init_lock:
-                self.driver = uc.Chrome(
-                    options=options,
-                    browser_executable_path="/usr/bin/chromium",
-                    driver_executable_path="/usr/bin/chromedriver",
-                    use_subprocess=True
-                )
-                self.driver.set_page_load_timeout(60)
-                self.driver.set_script_timeout(30)
+            self.session = StealthySession(
+                headless=True,
+                network_idle=True,
+                load_dom=True,
+                humanize=True,
+                solve_cloudflare=True,
+                timeout=60_000,
+                wait=5_000,
+            )
+            start = getattr(self.session, "start", None)
+            if callable(start):
+                start()
         except Exception as e:
-            print(f"Failed to initialize undetected_chromedriver: {e}")
-            self.driver = None
+            print(f"Failed to initialize Scrapling Stealth session: {e}")
+            self.session = None
 
     def close(self):
-        if self.driver:
+        if self.session:
             try:
-                self.driver.quit()
+                self.session.close()
             except Exception:
                 pass
 
     @staticmethod
-    def _safe_filename(url: str) -> str:
-        domain = urlparse(url).netloc.replace("www.", "")
-        safe_domain = "".join(c for c in domain if c.isalnum() or c in ".-_")[:50]
-        hash_part = hashlib.md5(url.encode()).hexdigest()[:8]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{safe_domain}_{hash_part}_{timestamp}.png"
+    def _decode_body(response) -> str:
+        body = getattr(response, "body", b"") or b""
+        if isinstance(body, str):
+            return body
+        encoding = getattr(response, "encoding", None) or "utf-8"
+        return body.decode(encoding, errors="replace")
+
+    @staticmethod
+    def _extract_title(response) -> str:
+        titles = response.css("title::text").getall()
+        if not titles:
+            return ""
+        return titles[0].strip()
+
+    @staticmethod
+    def _as_dict(value) -> Dict:
+        try:
+            return dict(value)
+        except Exception:
+            return {}
+
+    def _build_metadata(self, url: str, response, elapsed_ms: float) -> Dict:
+        redirect_history = []
+        for redirect in getattr(response, "history", []) or []:
+            redirect_history.append(
+                {
+                    "status_code": getattr(redirect, "status", None),
+                    "url": getattr(redirect, "url", None),
+                    "headers": self._as_dict(getattr(redirect, "headers", {})),
+                    "timestamp": datetime.utcnow(),
+                }
+            )
+
+        final_url = getattr(response, "url", None) or url
+        body = getattr(response, "body", b"") or b""
+        return {
+            "url": url,
+            "status_code": getattr(response, "status", None),
+            "headers": self._as_dict(getattr(response, "headers", {})),
+            "encoding": getattr(response, "encoding", None),
+            "elapsed_ms": elapsed_ms,
+            "final_url": final_url,
+            "redirect_count": len(redirect_history),
+            "redirect_history": redirect_history,
+            "content_length": len(body),
+            "timestamp": datetime.utcnow(),
+        }
 
     def fetch(self, url: str) -> Dict:
-        if not self.driver:
-            return {"url": url, "status": "error", "error": "No driver initialized"}
+        if not self.session:
+            error = "No Scrapling Stealth session initialized"
+            return {
+                "url": url,
+                "status": "error",
+                "error": error,
+                "metadata": {"url": url, "error": error, "timestamp": datetime.utcnow()},
+            }
 
+        started_at = time.perf_counter()
         try:
-            self.driver.get(url)
-            WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            response = self.session.fetch(
+                url,
+                wait_selector="body",
             )
-        except (TimeoutException, WebDriverException, urllib3.exceptions.ReadTimeoutError) as e:
-            return {"url": url, "status": "error", "error": str(e)}
+        except Exception as e:
+            return {
+                "url": url,
+                "status": "error",
+                "error": str(e),
+                "metadata": {"url": url, "error": str(e), "timestamp": datetime.utcnow()},
+            }
 
-        time.sleep(5)
-        soup = BeautifulSoup(self.driver.page_source, "html.parser")
-        title = soup.title.string if soup.title else ""
-
-        screenshot_dir = "data/screenshots"
-        os.makedirs(screenshot_dir, exist_ok=True)
-        filename = self._safe_filename(url)
-        path = os.path.join(screenshot_dir, filename)
-        try:
-            self.driver.save_screenshot(path)
-        except Exception:
-            path = None
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        html = self._decode_body(response)
+        title = self._extract_title(response)
+        metadata = self._build_metadata(url, response, elapsed_ms)
 
         return {
             "url": url,
             "title": title,
-            "html": self.driver.page_source,
-            "screenshot_path": path,
+            "html": html,
             "fetched_at": datetime.utcnow(),
-            "error": None
+            "metadata": metadata,
+            "error": None,
         }
 
 
@@ -207,8 +243,7 @@ def worker_thread(thread_id: int, q: queue.Queue, mongo: MongoManager):
             print(f"Worker-{thread_id} fetching: {url}")
             result = browser.fetch(url)
             rdap_info = fetch_rdap_data(url)
-            metadata = extract_request_metadata(url)
-            result.update({"rdap": rdap_info, "metadata": metadata})
+            result.update({"rdap": rdap_info})
 
             try:
                 mongo.save_content(result)
@@ -275,7 +310,7 @@ def run(interval_min: int = 10, workers: int = 4):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Parallel Website Fetcher with RDAP, Metadata, and undetected_chromedriver")
+    parser = argparse.ArgumentParser(description="Parallel website fetcher with RDAP, metadata, and Scrapling Stealth")
     parser.add_argument("--period", type=int, default=10, help="Interval in minutes")
     parser.add_argument("--workers", type=int, default=int(os.getenv("PARALLEL_WORKERS", "3")), help="Number of parallel browser workers")
     args = parser.parse_args()

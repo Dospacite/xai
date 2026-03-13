@@ -21,7 +21,16 @@ def start_child(script: str, period: int) -> subprocess.Popen:
     """Start a child Python script with the given period and return the Popen object."""
     cmd = [sys.executable, script, "--period", str(period)]
     logging.info("Starting %s (period=%s)", script, period)
-    return subprocess.Popen(cmd)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if proc.stdout:
+        os.set_blocking(proc.stdout.fileno(), False)
+    return proc
 
 
 def terminate_children(timeout: float = 5.0):
@@ -54,24 +63,33 @@ def terminate_children(timeout: float = 5.0):
 
 
 def forward_output(proc: subprocess.Popen, name: str):
-    """Non-blocking-ish drain of stdout (called infrequently in the monitor loop)."""
+    """Drain available child output without blocking the monitor loop."""
     if proc.stdout:
-        # read available lines without blocking - .readline() will block if nothing
-        # so use .read() limited to avoid blocking too long; here small chunk
         try:
             out = proc.stdout.read()
             if out:
                 for line in out.splitlines():
                     logging.info("[%s] %s", name, line)
+        except BlockingIOError:
+            pass
         except Exception:
-            # If the OS buffer doesn't support non-blocking read, ignore
             pass
 
 
 def main():
     parser = argparse.ArgumentParser(description="Startup both fetchers concurrently")
-    parser.add_argument("--main-period", type=int, default=10, help="main.py period in minutes")
-    parser.add_argument("--fetch-period", type=int, default=10, help="fetch_website_content.py period in minutes")
+    parser.add_argument(
+        "--main-period",
+        type=int,
+        default=int(os.getenv("MAIN_PERIOD", "10")),
+        help="main.py period in minutes",
+    )
+    parser.add_argument(
+        "--fetch-period",
+        type=int,
+        default=int(os.getenv("FETCH_PERIOD", "10")),
+        help="fetch_website_content.py period in minutes",
+    )
     args = parser.parse_args()
 
     # Start children

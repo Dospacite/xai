@@ -1,7 +1,5 @@
 pymongo
 python-dotenv
 requests
-selenium
-beautifulsoup4
-undetected-chromedriver
-filelock
+scrapling[fetchers]
+tldextract
