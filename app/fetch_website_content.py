@@ -4,7 +4,7 @@ import signal
 import ipaddress
 import requests
 from datetime import datetime
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse
 from typing import Dict, List
 import threading
 import queue
@@ -18,6 +18,7 @@ import tldextract
 load_dotenv()
 RUNNING = True
 RDAP_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=None)
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://host.docker.internal:27017/")
 
 def handle_signal(sig, frame):
     global RUNNING
@@ -79,13 +80,7 @@ def fetch_rdap_data(url: str) -> Dict:
 
 class MongoManager:
     def __init__(self):
-        host = os.getenv("MONGO_HOST", "mongodb")
-        port = int(os.getenv("MONGO_PORT", "27017"))
-        mongo_user = quote_plus(os.getenv("MONGO_USER", "admin"))
-        mongo_password = quote_plus(os.getenv("MONGO_PASSWORD", "password"))
-        # url encode username and password
-        mongo_uri = f"mongodb://{mongo_user}:{mongo_password}@{host}:{port}/phishing_db?authSource=admin"
-        self.client = MongoClient(mongo_uri)
+        self.client = MongoClient(MONGO_URI)
         self.db = self.client.phishing_db
         self.urls = self.db.phishing_urls
         self.content = self.db.website_content
